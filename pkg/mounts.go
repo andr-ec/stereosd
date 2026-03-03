@@ -140,13 +140,13 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 	// For bind mounts, the contents are still owned by the host user.
 	// Set recursive POSIX ACLs so the agent user can read/write files
 	// without changing the original ownership.
+	// Only set ACLs on existing files (-Rm), NOT default ACLs (-Rdm).
+	// Default ACLs cause new directories to inherit ACL entries, which
+	// breaks tools like PostgreSQL that require exact 0700 permissions.
+	// New files created by the agent are already owned by agent.
 	if m.FSType == "bind" && !m.ReadOnly {
 		if err := mm.commander.Run("setfacl", "-Rm", "u:agent:rwX", guestPath); err != nil {
 			log.Printf("mounts: warning: failed to set ACLs on %s: %v", guestPath, err)
-		}
-		// Default ACLs so newly created files also grant agent access
-		if err := mm.commander.Run("setfacl", "-Rdm", "u:agent:rwX", guestPath); err != nil {
-			log.Printf("mounts: warning: failed to set default ACLs on %s: %v", guestPath, err)
 		}
 	}
 

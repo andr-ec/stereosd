@@ -137,6 +137,19 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 	// already created the user).
 	mm.commander.Run("chown", "agent:agent", guestPath)
 
+	// For bind mounts, the contents are still owned by the host user.
+	// Set recursive POSIX ACLs so the agent user can read/write files
+	// without changing the original ownership.
+	if m.FSType == "bind" && !m.ReadOnly {
+		if err := mm.commander.Run("setfacl", "-Rm", "u:agent:rwX", guestPath); err != nil {
+			log.Printf("mounts: warning: failed to set ACLs on %s: %v", guestPath, err)
+		}
+		// Default ACLs so newly created files also grant agent access
+		if err := mm.commander.Run("setfacl", "-Rdm", "u:agent:rwX", guestPath); err != nil {
+			log.Printf("mounts: warning: failed to set default ACLs on %s: %v", guestPath, err)
+		}
+	}
+
 	// Track the mount for cleanup
 	mm.mounts = append(mm.mounts, *m)
 

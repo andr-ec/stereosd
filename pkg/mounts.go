@@ -1,4 +1,4 @@
-// mounts.go implements shared directory mounting for virtio-fs and 9p shares.
+// mounts.go implements shared directory mounting for virtio-fs, 9p, and bind shares.
 //
 // The host defines shared directories in jcard.toml [[shared]] entries.
 // When stereosd receives a mount message, it:
@@ -9,6 +9,7 @@
 // Supported filesystem types:
 //   - "virtiofs" — virtio-fs (preferred, better performance)
 //   - "9p"       — Plan 9 filesystem (fallback, wider compatibility)
+//   - "bind"     — bind mount (native backend, no VM)
 package stereosd
 
 import (
@@ -75,10 +76,10 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 
 	// Validate filesystem type
 	switch m.FSType {
-	case "virtiofs", "9p":
+	case "virtiofs", "9p", "bind":
 		// OK
 	default:
-		return fmt.Errorf("unsupported filesystem type: %q (must be virtiofs or 9p)", m.FSType)
+		return fmt.Errorf("unsupported filesystem type: %q (must be virtiofs, 9p, or bind)", m.FSType)
 	}
 
 	// Sanitize the guest path — must be absolute
@@ -99,21 +100,31 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 		return fmt.Errorf("create mount point %q: %w", guestPath, err)
 	}
 
-	// Build mount options
-	var opts []string
-	if m.FSType == "9p" {
-		opts = append(opts, "trans=virtio,version=9p2000.L")
+	// Build mount command based on filesystem type
+	var args []string
+	if m.FSType == "bind" {
+		// Bind mount: Tag is the source path on the host
+		var opts []string
+		opts = append(opts, "bind")
+		if m.ReadOnly {
+			opts = append(opts, "ro")
+		}
+		args = []string{"--make-private", "-o", strings.Join(opts, ","), m.Tag, guestPath}
+	} else {
+		// virtiofs / 9p: Tag is the device tag
+		var opts []string
+		if m.FSType == "9p" {
+			opts = append(opts, "trans=virtio,version=9p2000.L")
+		}
+		if m.ReadOnly {
+			opts = append(opts, "ro")
+		}
+		args = []string{"-t", m.FSType}
+		if len(opts) > 0 {
+			args = append(args, "-o", strings.Join(opts, ","))
+		}
+		args = append(args, m.Tag, guestPath)
 	}
-	if m.ReadOnly {
-		opts = append(opts, "ro")
-	}
-
-	// Construct mount command
-	args := []string{"-t", m.FSType}
-	if len(opts) > 0 {
-		args = append(args, "-o", strings.Join(opts, ","))
-	}
-	args = append(args, m.Tag, guestPath)
 
 	log.Printf("mounts: mounting %s (%s) at %s", m.Tag, m.FSType, guestPath)
 

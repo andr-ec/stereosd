@@ -28,6 +28,14 @@ const (
 	// MsgShutdown requests a graceful shutdown of the StereOS instance.
 	MsgShutdown MessageType = "shutdown"
 
+	// MsgStopAgent requests stereosd to stop the agent and unmount shared
+	// directories without shutting down the host OS. Used by the native
+	// backend where the host is not a dedicated VM.
+	MsgStopAgent MessageType = "stop_agent"
+
+	// MsgForceStopAgent is like MsgStopAgent but skips any grace period.
+	MsgForceStopAgent MessageType = "force_stop_agent"
+
 	// MsgSetConfig delivers the jcard.toml configuration to the guest.
 	// stereosd writes it to /etc/stereos/jcard.toml for agentd to consume.
 	MsgSetConfig MessageType = "set_config"
@@ -162,6 +170,12 @@ type HealthPayload struct {
 // ShutdownPayload is the payload for MsgShutdown messages.
 type ShutdownPayload struct {
 	// Reason describes why shutdown was requested.
+	Reason string `json:"reason,omitempty"`
+}
+
+// StopAgentPayload is the payload for MsgStopAgent and MsgForceStopAgent.
+type StopAgentPayload struct {
+	// Reason describes why the stop was requested.
 	Reason string `json:"reason,omitempty"`
 }
 

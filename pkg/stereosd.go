@@ -364,6 +364,24 @@ func (d *Daemon) HandleMessage(ctx context.Context, env *Envelope) (*Envelope, e
 			OK:      true,
 		})
 
+	case MsgStopAgent, MsgForceStopAgent:
+		var payload StopAgentPayload
+		if env.Payload != nil {
+			env.DecodePayload(&payload)
+		}
+
+		reason := "host requested stop"
+		if payload.Reason != "" {
+			reason = payload.Reason
+		}
+		log.Printf("stop_agent: unmounting shared directories (reason: %s)", reason)
+		d.mounts.UnmountAll()
+
+		return NewEnvelope(MsgAck, &AckPayload{
+			ReplyTo: env.Type,
+			OK:      true,
+		})
+
 	default:
 		return nil, fmt.Errorf("unknown message type: %s", env.Type)
 	}

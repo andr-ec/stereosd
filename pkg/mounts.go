@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // MountManager handles mounting and unmounting shared directories.
@@ -100,16 +101,40 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 		return fmt.Errorf("create mount point %q: %w", guestPath, err)
 	}
 
-	// Build mount command based on filesystem type
-	var args []string
 	if m.FSType == "bind" {
-		// Bind mount: Tag is the source path on the host
-		var opts []string
-		opts = append(opts, "bind")
-		if m.ReadOnly {
-			opts = append(opts, "ro")
+		// Use bindfs (FUSE) for transparent UID/GID mapping between
+		// host user and agent. All files appear owned by agent inside
+		// the mount, and new files created by agent are stored with
+		// the host user's UID/GID on the underlying filesystem.
+		info, err := os.Stat(m.Tag)
+		if err != nil {
+			return fmt.Errorf("stat source %q: %w", m.Tag, err)
 		}
-		args = []string{"--make-private", "-o", strings.Join(opts, ","), m.Tag, guestPath}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("cannot determine owner of %q", m.Tag)
+		}
+
+		args := []string{
+			"--force-user=agent",
+			"--force-group=agent",
+		}
+		if !m.ReadOnly {
+			args = append(args,
+				fmt.Sprintf("--create-for-user=%d", stat.Uid),
+				fmt.Sprintf("--create-for-group=%d", stat.Gid),
+			)
+		}
+		fuseOpts := "allow_other"
+		if m.ReadOnly {
+			fuseOpts += ",ro"
+		}
+		args = append(args, "-o", fuseOpts, m.Tag, guestPath)
+
+		log.Printf("mounts: bindfs mounting %s at %s (host uid=%d gid=%d)", m.Tag, guestPath, stat.Uid, stat.Gid)
+		if err := mm.commander.Run("bindfs", args...); err != nil {
+			return fmt.Errorf("bindfs mount %s at %s: %w", m.Tag, guestPath, err)
+		}
 	} else {
 		// virtiofs / 9p: Tag is the device tag
 		var opts []string
@@ -119,35 +144,18 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 		if m.ReadOnly {
 			opts = append(opts, "ro")
 		}
-		args = []string{"-t", m.FSType}
+		args := []string{"-t", m.FSType}
 		if len(opts) > 0 {
 			args = append(args, "-o", strings.Join(opts, ","))
 		}
 		args = append(args, m.Tag, guestPath)
-	}
 
-	log.Printf("mounts: mounting %s (%s) at %s", m.Tag, m.FSType, guestPath)
-
-	if err := mm.commander.Run("mount", args...); err != nil {
-		return fmt.Errorf("mount %s at %s: %w", m.Tag, guestPath, err)
-	}
-
-	// Set ownership to agent user (best effort — the user may not exist
-	// if this is called very early, but systemd-tmpfiles should have
-	// already created the user).
-	mm.commander.Run("chown", "agent:agent", guestPath)
-
-	// For bind mounts, the contents are still owned by the host user.
-	// Set recursive POSIX ACLs so the agent user can read/write files
-	// without changing the original ownership.
-	// Only set ACLs on existing files (-Rm), NOT default ACLs (-Rdm).
-	// Default ACLs cause new directories to inherit ACL entries, which
-	// breaks tools like PostgreSQL that require exact 0700 permissions.
-	// New files created by the agent are already owned by agent.
-	if m.FSType == "bind" && !m.ReadOnly {
-		if err := mm.commander.Run("setfacl", "-Rm", "u:agent:rwX", guestPath); err != nil {
-			log.Printf("mounts: warning: failed to set ACLs on %s: %v", guestPath, err)
+		log.Printf("mounts: mounting %s (%s) at %s", m.Tag, m.FSType, guestPath)
+		if err := mm.commander.Run("mount", args...); err != nil {
+			return fmt.Errorf("mount %s at %s: %w", m.Tag, guestPath, err)
 		}
+		// Set ownership to agent user
+		mm.commander.Run("chown", "agent:agent", guestPath)
 	}
 
 	// Track the mount for cleanup

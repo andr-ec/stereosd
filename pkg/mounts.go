@@ -165,6 +165,36 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 	return nil
 }
 
+// Unmount unmounts a single shared directory identified by its guest path
+// and removes it from the tracked mount list. Idempotent: unmounting a
+// path that isn't currently tracked is a no-op (returns nil).
+//
+// Used by host-side teardown (e.g. `mb destroy`) so a follow-up removal
+// of the underlying source directory doesn't leave a dangling FUSE mount
+// whose backing source no longer exists.
+func (mm *MountManager) Unmount(guestPath string) error {
+	guestPath = filepath.Clean(guestPath)
+
+	idx := -1
+	for i, m := range mm.mounts {
+		if filepath.Clean(m.GuestPath) == guestPath {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+
+	log.Printf("mounts: unmounting %s", guestPath)
+	if err := mm.commander.Run("umount", guestPath); err != nil {
+		return fmt.Errorf("umount %s: %w", guestPath, err)
+	}
+
+	mm.mounts = append(mm.mounts[:idx], mm.mounts[idx+1:]...)
+	return nil
+}
+
 // UnmountAll unmounts all tracked shared directories in reverse order.
 func (mm *MountManager) UnmountAll() {
 	for i := len(mm.mounts) - 1; i >= 0; i-- {

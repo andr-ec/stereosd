@@ -25,6 +25,13 @@ const (
 	// MsgMount requests stereosd to mount a shared directory.
 	MsgMount MessageType = "mount"
 
+	// MsgUnmount requests stereosd to unmount a shared directory previously
+	// mounted via MsgMount. Idempotent: unmounting a path that isn't
+	// currently mounted is not an error. Used by host-side teardown (e.g.
+	// `mb destroy`) to drop bindfs mounts before removing the host-side
+	// source directory.
+	MsgUnmount MessageType = "unmount"
+
 	// MsgShutdown requests a graceful shutdown of the StereOS instance.
 	MsgShutdown MessageType = "shutdown"
 
@@ -133,6 +140,13 @@ type MountPayload struct {
 	FSType string `json:"fs_type"`
 	// ReadOnly mounts the filesystem read-only if true.
 	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// UnmountPayload is the payload for MsgUnmount messages.
+type UnmountPayload struct {
+	// GuestPath identifies the mount to remove. Matches the GuestPath that
+	// was passed to MsgMount.
+	GuestPath string `json:"guest_path"`
 }
 
 // AckPayload is the payload for MsgAck messages.

@@ -344,6 +344,23 @@ func (d *Daemon) HandleMessage(ctx context.Context, env *Envelope) (*Envelope, e
 			OK:      true,
 		})
 
+	case MsgUnmount:
+		var payload UnmountPayload
+		if err := env.DecodePayload(&payload); err != nil {
+			return nil, fmt.Errorf("decode unmount payload: %w", err)
+		}
+		if err := d.mounts.Unmount(payload.GuestPath); err != nil {
+			return NewEnvelope(MsgAck, &AckPayload{
+				ReplyTo: MsgUnmount,
+				OK:      false,
+				Error:   err.Error(),
+			})
+		}
+		return NewEnvelope(MsgAck, &AckPayload{
+			ReplyTo: MsgUnmount,
+			OK:      true,
+		})
+
 	case MsgShutdown:
 		var payload ShutdownPayload
 		// Payload is optional for shutdown

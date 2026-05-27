@@ -27,7 +27,6 @@ const (
 	sandboxUIDMax        = 2999
 	sandboxShellDir      = "/run/stereos/shells"
 	sandboxNsenterBinary = "/run/wrappers/bin/nsenter-sandbox"
-	sandboxLoginShell    = "/bin/bash" // bash --login inside the netns
 	// sandboxSharedNetns is the netns name all sb-<name> users currently
 	// join. Phase 1 reuses the existing agent-sandbox netns (set up by
 	// the agent-netns service with veth + NAT) so sb sandboxes have
@@ -36,6 +35,19 @@ const (
 	// then.
 	sandboxSharedNetns = "agent-sandbox"
 )
+
+// sandboxLoginShell is resolved at startup from $PATH so the generated
+// shell wrapper works on systems without /bin/bash (notably NixOS,
+// where bash lives at /run/current-system/sw/bin/bash or similar).
+// Falls back to /bin/bash if LookPath fails; that path may not exist,
+// but the failure is loud (sshd reports "No such file or directory")
+// rather than silent.
+var sandboxLoginShell = func() string {
+	if p, err := exec.LookPath("bash"); err == nil {
+		return p
+	}
+	return "/bin/bash"
+}()
 
 // sandboxNameRe restricts sandbox names to characters safe for both
 // usernames and netns names: lowercase alphanumerics plus _ and -.

@@ -28,6 +28,13 @@ const (
 	sandboxShellDir      = "/run/stereos/shells"
 	sandboxNsenterBinary = "/run/wrappers/bin/nsenter-sandbox"
 	sandboxLoginShell    = "/bin/bash" // bash --login inside the netns
+	// sandboxSharedNetns is the netns name all sb-<name> users currently
+	// join. Phase 1 reuses the existing agent-sandbox netns (set up by
+	// the agent-netns service with veth + NAT) so sb sandboxes have
+	// outbound internet. Phase 2 will give each sandbox its own netns
+	// with dedicated veth/NAT; this constant will move to NewUserManager
+	// then.
+	sandboxSharedNetns = "agent-sandbox"
 )
 
 // sandboxNameRe restricts sandbox names to characters safe for both
@@ -102,9 +109,9 @@ func (m *UserManager) CreateSandboxUser(payload *SandboxUserPayload) error {
 		return fmt.Errorf("useradd %s: %w: %s", username, err, strings.TrimSpace(string(out)))
 	}
 
-	if err := ensureNetns(payload.Name); err != nil {
-		return fmt.Errorf("create netns: %w", err)
-	}
+	// Phase 1 reuses the existing agent-sandbox netns. ensureNetns
+	// stays defined for Phase 2 (per-sandbox netns + veth/NAT) but is
+	// not called here.
 
 	if m.hmGenPath != "" {
 		if err := symlinkHomeManagerTree(m.hmGenPath, home, uid); err != nil {
@@ -165,13 +172,9 @@ func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 		}
 	}
 
-	// 4. netns.
-	if _, err := os.Stat("/run/netns/" + payload.Name); err == nil {
-		cmd := exec.Command("ip", "netns", "del", payload.Name)
-		if out, err := cmd.CombinedOutput(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("ip netns del %s: %w: %s", payload.Name, err, strings.TrimSpace(string(out)))
-		}
-	}
+	// 4. netns — Phase 1 shares the agent-sandbox netns owned by the
+	// agent-netns systemd service, so there's nothing per-sandbox to
+	// destroy here. Reinstate per-sandbox netns deletion in Phase 2.
 
 	// 5. Shell wrapper.
 	shellPath := filepath.Join(sandboxShellDir, "sb-"+payload.Name)
@@ -279,7 +282,7 @@ if [ -e /run/netns/%s ]; then
 else
   exec %s --login "$@"
 fi
-`, sandboxLoginShell, name, sandboxNsenterBinary, name, sandboxLoginShell, sandboxLoginShell)
+`, sandboxLoginShell, sandboxSharedNetns, sandboxNsenterBinary, sandboxSharedNetns, sandboxLoginShell, sandboxLoginShell)
 
 	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)

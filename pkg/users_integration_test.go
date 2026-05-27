@@ -71,7 +71,6 @@ func TestSandboxUserLifecycle(t *testing.T) {
 		"/home/" + username,
 		"/home/" + username + "/.zshrc",
 		"/home/" + username + "/.config",
-		"/run/netns/" + name,
 		"/run/stereos/shells/" + username,
 	} {
 		if _, err := os.Lstat(want); err != nil {
@@ -101,7 +100,6 @@ func TestSandboxUserLifecycle(t *testing.T) {
 	}
 	for _, gone := range []string{
 		"/home/" + username,
-		"/run/netns/" + name,
 		"/run/stereos/shells/" + username,
 	} {
 		if _, err := os.Lstat(gone); err == nil {
@@ -162,9 +160,6 @@ func TestTwoSandboxesAreIndependent(t *testing.T) {
 	}
 	if _, err := os.Stat(ub.HomeDir); err != nil {
 		t.Errorf("B's home gone after destroying A: %v", err)
-	}
-	if _, err := os.Stat("/run/netns/" + b); err != nil {
-		t.Errorf("B's netns gone after destroying A: %v", err)
 	}
 }
 

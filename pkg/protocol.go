@@ -52,6 +52,18 @@ const (
 	// per-sandbox SSH authentication without pre-baked keys in the image.
 	MsgInjectSSHKey MessageType = "inject_ssh_key"
 
+	// MsgCreateSandboxUser requests stereosd to provision a per-sandbox
+	// system user (sb-<name>) with its own home, netns, and login-shell
+	// wrapper. Idempotent: re-creating an existing sandbox user is a no-op.
+	// See SandboxUserPayload for the request shape.
+	MsgCreateSandboxUser MessageType = "create_sandbox_user"
+
+	// MsgDestroySandboxUser tears down a sandbox user previously created
+	// via MsgCreateSandboxUser: userdel -r, removes the netns, and unlinks
+	// the login-shell wrapper. Idempotent: destroying a missing user is
+	// not an error.
+	MsgDestroySandboxUser MessageType = "destroy_sandbox_user"
+
 	// -- Guest -> Host (vsock) messages -------------------------------------
 
 	// MsgPong is the response to a ping.
@@ -207,4 +219,13 @@ type SSHKeyPayload struct {
 
 	// PublicKey is the SSH public key to inject (e.g., "ssh-ed25519 AAAA... comment").
 	PublicKey string `json:"public_key"`
+}
+
+// SandboxUserPayload is the payload for MsgCreateSandboxUser and
+// MsgDestroySandboxUser. Name is the sandbox identifier; stereosd
+// derives the username as sb-<name> and the home as /home/sb-<name>.
+type SandboxUserPayload struct {
+	// Name identifies the sandbox. The resulting user is sb-<name>;
+	// only [a-z0-9_-]{1,24} is accepted to keep usernames POSIX-clean.
+	Name string `json:"name"`
 }

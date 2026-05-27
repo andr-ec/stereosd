@@ -107,6 +107,7 @@ type Daemon struct {
 	secrets   *SecretManager
 	sshkeys   *SSHKeyManager
 	mounts    *MountManager
+	users     *UserManager
 	ipc       *IPCServer
 	agentd    *AgentdClient
 	shutdown  *ShutdownCoordinator
@@ -144,6 +145,10 @@ func NewDaemonWithConfig(config Config) *Daemon {
 	secrets := NewSecretManager(config.RuntimeDirs.Secrets)
 	sshkeys := NewSSHKeyManager()
 	mounts := NewMountManager(commander)
+	// hmGenPath is the agent user's home-manager-files store path.
+	// The stereos NixOS module sets STEREOSD_AGENT_HM_GEN; empty in
+	// dev/test just skips the HM symlink step in CreateSandboxUser.
+	users := NewUserManager(os.Getenv("STEREOSD_AGENT_HM_GEN"))
 
 	d := &Daemon{
 		config:            config,
@@ -151,6 +156,7 @@ func NewDaemonWithConfig(config Config) *Daemon {
 		secrets:           secrets,
 		sshkeys:           sshkeys,
 		mounts:            mounts,
+		users:             users,
 		agentd:            NewAgentdClient(config.AgentdSocketPath),
 		shutdownRequested: make(chan struct{}),
 	}
@@ -327,6 +333,40 @@ func (d *Daemon) HandleMessage(ctx context.Context, env *Envelope) (*Envelope, e
 			OK:      true,
 		})
 
+	case MsgCreateSandboxUser:
+		var payload SandboxUserPayload
+		if err := env.DecodePayload(&payload); err != nil {
+			return nil, fmt.Errorf("decode create sandbox user payload: %w", err)
+		}
+		if err := d.users.CreateSandboxUser(&payload); err != nil {
+			return NewEnvelope(MsgAck, &AckPayload{
+				ReplyTo: MsgCreateSandboxUser,
+				OK:      false,
+				Error:   err.Error(),
+			})
+		}
+		return NewEnvelope(MsgAck, &AckPayload{
+			ReplyTo: MsgCreateSandboxUser,
+			OK:      true,
+		})
+
+	case MsgDestroySandboxUser:
+		var payload SandboxUserPayload
+		if err := env.DecodePayload(&payload); err != nil {
+			return nil, fmt.Errorf("decode destroy sandbox user payload: %w", err)
+		}
+		if err := d.users.DestroySandboxUser(&payload); err != nil {
+			return NewEnvelope(MsgAck, &AckPayload{
+				ReplyTo: MsgDestroySandboxUser,
+				OK:      false,
+				Error:   err.Error(),
+			})
+		}
+		return NewEnvelope(MsgAck, &AckPayload{
+			ReplyTo: MsgDestroySandboxUser,
+			OK:      true,
+		})
+
 	case MsgMount:
 		var payload MountPayload
 		if err := env.DecodePayload(&payload); err != nil {
@@ -422,6 +462,11 @@ func (d *Daemon) Mounts() *MountManager {
 // SSHKeys returns the SSH key manager for external access.
 func (d *Daemon) SSHKeys() *SSHKeyManager {
 	return d.sshkeys
+}
+
+// Users returns the sandbox-user manager for external access.
+func (d *Daemon) Users() *UserManager {
+	return d.users
 }
 
 // Agentd returns the agentd client for external access.

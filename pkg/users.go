@@ -53,8 +53,41 @@ type UserManager struct {
 // NewUserManager constructs a UserManager. hmGenPath is typically read
 // from $STEREOSD_AGENT_HM_GEN, set by the stereos NixOS module so it
 // pins the agent-user's home-manager-files store path.
+//
+// Scans /etc/passwd for existing sb-* users and re-writes their shell
+// wrappers under /run/stereos/shells/. Necessary because that directory
+// lives on tmpfs (systemd RuntimeDirectory) and gets cleared on every
+// stereosd restart while user records persist in /etc/passwd.
 func NewUserManager(hmGenPath string) *UserManager {
-	return &UserManager{hmGenPath: hmGenPath}
+	m := &UserManager{hmGenPath: hmGenPath}
+	m.reconcileShellWrappers()
+	return m
+}
+
+// reconcileShellWrappers re-creates /run/stereos/shells/sb-<name> for
+// every sb-* user already in /etc/passwd. Idempotent and best-effort.
+func (m *UserManager) reconcileShellWrappers() {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		log.Printf("users: cannot read /etc/passwd at startup: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.SplitN(line, ":", 8)
+		if len(fields) < 1 {
+			continue
+		}
+		username := fields[0]
+		if !strings.HasPrefix(username, sandboxUserPrefix) {
+			continue
+		}
+		name := username[len(sandboxUserPrefix):]
+		if _, err := writeSandboxShell(name); err != nil {
+			log.Printf("users: reconcile shell for %s: %v", username, err)
+			continue
+		}
+		log.Printf("users: reconciled shell wrapper for %s", username)
+	}
 }
 
 // CreateSandboxUser provisions sb-<name>. Steps, in order:
@@ -79,19 +112,23 @@ func (m *UserManager) CreateSandboxUser(payload *SandboxUserPayload) error {
 
 	username := sandboxUserPrefix + payload.Name
 
+	// Always reconcile the shell wrapper. /run/stereos/shells lives on
+	// tmpfs (systemd RuntimeDirectory) so a stereosd restart wipes it
+	// even though the user record in /etc/passwd survives; without
+	// re-writing here, the next `mb ssh` lands on a missing shell.
+	shellPath, err := writeSandboxShell(payload.Name)
+	if err != nil {
+		return fmt.Errorf("write shell wrapper: %w", err)
+	}
+
 	if _, err := user.Lookup(username); err == nil {
-		log.Printf("users: %s already exists, no-op", username)
+		log.Printf("users: %s already exists, reconciled shell wrapper", username)
 		return nil
 	}
 
 	uid, err := allocateSandboxUID()
 	if err != nil {
 		return fmt.Errorf("allocate uid: %w", err)
-	}
-
-	shellPath, err := writeSandboxShell(payload.Name)
-	if err != nil {
-		return fmt.Errorf("write shell wrapper: %w", err)
 	}
 
 	home := "/home/" + username

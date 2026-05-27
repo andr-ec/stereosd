@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -103,9 +104,9 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 
 	if m.FSType == "bind" {
 		// Use bindfs (FUSE) for transparent UID/GID mapping between
-		// host user and agent. All files appear owned by agent inside
-		// the mount, and new files created by agent are stored with
-		// the host user's UID/GID on the underlying filesystem.
+		// host user and the in-sandbox user. All files appear owned by
+		// that user inside the mount; new files created by them are
+		// stored with the host user's UID/GID on the underlying fs.
 		info, err := os.Stat(m.Tag)
 		if err != nil {
 			return fmt.Errorf("stat source %q: %w", m.Tag, err)
@@ -115,9 +116,14 @@ func (mm *MountManager) Mount(m *MountPayload) error {
 			return fmt.Errorf("cannot determine owner of %q", m.Tag)
 		}
 
+		// Pick --force-user/--force-group from the mount target. Mounts
+		// landing in /home/sb-<name>/... belong to the per-sandbox user;
+		// everything else stays on the legacy `agent` user.
+		forceUser, forceGroup := mountTargetOwner(guestPath)
+
 		args := []string{
-			"--force-user=agent",
-			"--force-group=agent",
+			"--force-user=" + forceUser,
+			"--force-group=" + forceGroup,
 		}
 		if !m.ReadOnly {
 			args = append(args,
@@ -214,4 +220,42 @@ func (mm *MountManager) ActiveMounts() []MountPayload {
 	result := make([]MountPayload, len(mm.mounts))
 	copy(result, mm.mounts)
 	return result
+}
+
+// mountTargetOwner returns the (user, group) names that bindfs should
+// project files as inside a mount at guestPath.
+//
+// Mounts at /home/sb-<name>/... belong to that per-sandbox user — the
+// in-sandbox harness logs in as sb-<name> so writes should appear
+// owned by them. Everything else (legacy /home/agent/* mounts, admin
+// shares, etc.) stays on the original `agent:agent` mapping.
+//
+// Looks up the actual primary group from /etc/passwd so we follow
+// whatever GID useradd assigned (currently "users" on this distro,
+// but don't bake it in).
+func mountTargetOwner(guestPath string) (forceUser, forceGroup string) {
+	forceUser, forceGroup = "agent", "agent"
+
+	const sbHomePrefix = "/home/sb-"
+	if !strings.HasPrefix(guestPath, sbHomePrefix) {
+		return
+	}
+	rest := guestPath[len(sbHomePrefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return
+	}
+	candidate := "sb-" + rest[:slash]
+	u, err := user.Lookup(candidate)
+	if err != nil {
+		// Sandbox user not provisioned yet — fall back rather than
+		// fail the mount; the caller can retry once Create lands.
+		log.Printf("mounts: target %s implies user %s but lookup failed: %v", guestPath, candidate, err)
+		return
+	}
+	forceUser = candidate
+	if g, err := user.LookupGroupId(u.Gid); err == nil {
+		forceGroup = g.Name
+	}
+	return
 }

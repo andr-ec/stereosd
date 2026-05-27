@@ -144,12 +144,18 @@ func (m *UserManager) CreateSandboxUser(payload *SandboxUserPayload) error {
 	}
 
 	home := "/home/" + username
+	// --groups=sandbox lets the user execute /run/wrappers/bin/nsenter-sandbox
+	// (the setuid wrapper for entering the per-sandbox netns). Without it,
+	// the per-sandbox shell wrapper fails on login with "Permission denied"
+	// on nsenter-sandbox. The sandbox group is declared by the stereos
+	// NixOS module; if absent, useradd will warn but succeed.
 	cmd := exec.Command(
 		"useradd",
 		"--system",
 		"--create-home",
 		"--home-dir", home,
 		"--uid", strconv.Itoa(uid),
+		"--groups", "sandbox",
 		"--shell", shellPath,
 		"--comment", "stereOS sandbox user for "+payload.Name,
 		username,

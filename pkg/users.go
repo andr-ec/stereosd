@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -119,6 +120,18 @@ func (m *UserManager) CreateSandboxUser(payload *SandboxUserPayload) error {
 // a no-op. Steps continue past individual failures so a half-broken
 // instance can still be cleaned up; the first error encountered is
 // returned at the end.
+//
+// Order matters:
+//  1. SIGKILL any processes still running as the user (otherwise
+//     userdel refuses with "user is currently used by process").
+//     Realistic case: agentd / claude-code / a stray SSH session.
+//  2. Unmount everything mounted under /home/<user>. Necessary for
+//     bindfs mounts that mb didn't tear down via MsgUnmount, and to
+//     avoid userdel -r deleting files THROUGH the mount into the
+//     host source.
+//  3. userdel --remove (removes /etc/passwd entry + home).
+//  4. ip netns del.
+//  5. Remove the per-sandbox shell wrapper.
 func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 	if payload == nil || payload.Name == "" {
 		return fmt.Errorf("sandbox name cannot be empty")
@@ -128,8 +141,23 @@ func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 	}
 
 	username := sandboxUserPrefix + payload.Name
+	home := "/home/" + username
 	var firstErr error
 
+	// 1. Kill any processes still owned by the user. pkill returns 1
+	// when there are no matching processes — that's fine.
+	if _, err := user.Lookup(username); err == nil {
+		killUserProcesses(username)
+	}
+
+	// 2. Unmount anything still mounted at or under the home dir.
+	// Defensive — mb should have unmounted shared mounts via
+	// MsgUnmount, but a hung mb or a partial up can leave leftovers.
+	if _, err := os.Stat(home); err == nil {
+		unmountAllUnder(home)
+	}
+
+	// 3. userdel --remove.
 	if _, err := user.Lookup(username); err == nil {
 		cmd := exec.Command("userdel", "--remove", username)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -137,6 +165,7 @@ func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 		}
 	}
 
+	// 4. netns.
 	if _, err := os.Stat("/run/netns/" + payload.Name); err == nil {
 		cmd := exec.Command("ip", "netns", "del", payload.Name)
 		if out, err := cmd.CombinedOutput(); err != nil && firstErr == nil {
@@ -144,6 +173,7 @@ func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 		}
 	}
 
+	// 5. Shell wrapper.
 	shellPath := filepath.Join(sandboxShellDir, "sb-"+payload.Name)
 	if err := os.Remove(shellPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
 		firstErr = fmt.Errorf("remove shell wrapper %s: %w", shellPath, err)
@@ -153,6 +183,52 @@ func (m *UserManager) DestroySandboxUser(payload *SandboxUserPayload) error {
 		log.Printf("users: destroyed %s", username)
 	}
 	return firstErr
+}
+
+// killUserProcesses sends SIGKILL to every process owned by username.
+// Loops a few times because new procs can be spawned between the kill
+// and userdel (e.g. a parent process respawning a child); bails out
+// when no procs are left or after the deadline.
+func killUserProcesses(username string) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		// pgrep exits 0 if any procs match, 1 if none.
+		if err := exec.Command("pgrep", "-u", username).Run(); err != nil {
+			return // no procs left
+		}
+		_ = exec.Command("pkill", "-9", "-u", username).Run()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// unmountAllUnder lazy-umounts every mountpoint at or under dir.
+// Lazy (-l) so an in-use mount detaches immediately and cleans up
+// once the last fd is closed — matches what we'd do manually.
+//
+// Iterates /proc/self/mounts because `mount` is a shell-out and may
+// not be on PATH inside stripped systemd unit environments.
+func unmountAllUnder(dir string) {
+	data, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return
+	}
+
+	// Walk top-down so deeper mounts get popped first. /proc/self/mounts
+	// is in mount-order; build a list and reverse for safety.
+	var targets []string
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		target := fields[1]
+		if target == dir || strings.HasPrefix(target, dir+"/") {
+			targets = append(targets, target)
+		}
+	}
+	for i := len(targets) - 1; i >= 0; i-- {
+		_ = exec.Command("umount", "-l", targets[i]).Run()
+	}
 }
 
 // allocateSandboxUID scans /etc/passwd for existing sb-* users and
